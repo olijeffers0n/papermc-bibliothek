@@ -4,14 +4,21 @@ import hashlib
 import importlib.metadata
 import json
 from io import BytesIO
+from json import JSONDecodeError
 from typing import List, Dict
 
 import dateutil.parser
 import urllib3
 
-__version__ = importlib.metadata.version('papermc-bibliothek')
+try:
+    __version__ = importlib.metadata.version('papermc-bibliothek')
+except importlib.metadata.PackageNotFoundError:
+    try:
+        __version__ = importlib.metadata.version('bibliothek')
+    except importlib.metadata.PackageNotFoundError:
+        __version__ = "0.0.0"
 
-PAPER_INSTANCE = 'https://papermc.io/api/v2/'
+PAPER_INSTANCE = 'https://api.papermc.io/v2/'
 
 
 @dataclasses.dataclass()
@@ -72,14 +79,6 @@ class BibliothekVersionBuilds:
 
 
 @dataclasses.dataclass()
-class BibliothekVersion:
-    project_id: str
-    project_name: str
-    version: str
-    builds: List[int]
-
-
-@dataclasses.dataclass()
 class BibliothekBuild:
     project_id: str
     project_name: str
@@ -98,20 +97,31 @@ class BibliothekException(Exception):
 
 class UnexpectedResponseBibliothekException(Exception):
     def __init__(self, response: urllib3.response.HTTPResponse):
-        self.response = response
+        self.response: urllib3.response.HTTPResponse = response
+
+        self._end = self.response.data
+
+        if self.response.status == 404:
+            try:
+                self._end = "Error: " + json.loads(self._end.decode('utf-8'))["error"]
+            except JSONDecodeError:
+                self._end = "Data: " + str(self._end)
+        else:
+            self._end = "Data: " + self._end
+
         super().__init__()
 
     def __str__(self):
-        return f"HTTP Code: {self.response.status}, expected 200. Data: {self.response.data.decode('utf-8')}"
+        return f"HTTP Code: {self.response.status}, expected 200. {self._end}"
 
 
 class Bibliothek:
-    def __init__(self, base_url: str = PAPER_INSTANCE) -> None:
+    def __init__(self, base_url: str = PAPER_INSTANCE, user_agent: str = f'papermc-bibliothek/{__version__}') -> None:
         """
         Create a Bibliothek instance
         :param base_url: Base URL for the API client, default is the papermc instance.
         """
-        self.pool_manager = urllib3.PoolManager(headers={'User-Agent': f'papermc-bibliothek/{__version__}'})
+        self.pool_manager = urllib3.PoolManager(headers={'User-Agent': user_agent})
         self.base_url = base_url
 
     @staticmethod
@@ -200,7 +210,7 @@ class Bibliothek:
                                             version_group_builds_dict["version_group"],
                                             version_group_builds_dict["versions"], builds)
 
-    def get_version(self, project_id: str, version: str) -> BibliothekVersion:
+    def get_version_builds(self, project_id: str, version: str) -> BibliothekVersionBuilds:
         """
         Get a bibliothek version
         :param project_id: a valid bibliothek project id
@@ -214,8 +224,8 @@ class Bibliothek:
 
         version_dict = json.loads(response.data)
 
-        return BibliothekVersion(version_dict["project_id"], version_dict["project_name"],
-                                 version_dict["version"], version_dict["builds"])
+        return BibliothekVersionBuilds(version_dict["project_id"], version_dict["project_name"],
+                                       version_dict["version"], version_dict["builds"])
 
     def get_build(self, project_id: str, version: str, build: int) -> BibliothekBuild:
         """
@@ -238,17 +248,17 @@ class Bibliothek:
                                self._change_data_list_to_change_list(build_dict["changes"]),
                                self._download_data_dict_to_download_dict(build_dict["downloads"]))
 
-    def download_build(self, project_id: str, version: str, build: int, download: str) -> BytesIO:
+    def download_build(self, project_id: str, version: str, build: int, filename: str) -> BytesIO:
         """
         downloads a build
         :param project_id: a valid bibliothek project id
         :param version: a valid bibliothek version for the project
         :param build: a valid bibliothek build
-        :param download: the name of the download, for paper usually `application`
+        :param filename: the name of the download, eg: `paper-1.18.2-286.jar`
         :return: A BytesIO object with the download
         """
         request = self.pool_manager.request("GET",
-                                            f"{self.base_url}projects/{project_id}/versions/{version}/builds/{build}/downloads/{download}",
+                                            f"{self.base_url}projects/{project_id}/versions/{version}/builds/{build}/downloads/{filename}",
                                             preload_content=False)
 
         download_bytesio = BytesIO()
@@ -259,6 +269,10 @@ class Bibliothek:
             download_bytesio.write(data)
 
         request.release_conn()
+
+        if request.status != 200:
+            raise UnexpectedResponseBibliothekException(request)
+
         return download_bytesio
 
     @staticmethod
